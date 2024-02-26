@@ -18,6 +18,12 @@
 use std::{path::PathBuf, collections::HashMap, fs};
 use clap::Parser;
 use id3::TagLike;
+use rand::prelude::*;
+
+pub enum OperationMode {
+    Organize,
+    Shuffle
+}
 
 /// Arguments for use in the binary. 
 /// The recommended way to use them is through the [Args::parse_and_get_dirs](Args::parse_and_get_dirs) function.
@@ -34,7 +40,10 @@ pub struct Args {
     output_dir: Option<PathBuf>,
     /// Overwrite contents of a directory
     #[arg(short = 'O', long)]
-    overwrite: bool
+    overwrite: bool,
+    /// Enable shuffle mode
+    #[arg(short = 'S', long)]
+    shuffle: bool
 }
 
 /// Config for use with the [organize_songs](organize_songs) function.
@@ -101,6 +110,29 @@ impl Args {
 
         AppConfig { input_dir, output_dir, overwrite }
     }
+
+    pub fn parse_and_get_mode_and_dirs() -> (AppConfig, OperationMode) {
+        let args = Args::parse();
+
+        let input_dir = if let Some(dir) = args.input_dir {
+            dir
+        } else {
+            std::env::current_dir().expect("couldn't get current working directory")
+        };
+
+        let output_dir = if let Some(dir) = args.output_dir {
+            dir
+        } else {
+            let mut dir = input_dir.clone();
+            dir.push("output");
+            dir
+        };
+
+        let overwrite = args.overwrite;
+        let operation_mode = if args.shuffle { OperationMode::Shuffle } else { OperationMode::Organize };
+
+        (AppConfig { input_dir, output_dir, overwrite }, operation_mode)
+    }
 }
 
 fn create_sanitization_regex() -> regex::Regex {
@@ -137,20 +169,84 @@ pub fn organize_songs(app_config: AppConfig) -> std::io::Result<()> {
     output_grouped_songs(app_config, grouped_paths)
 }
 
-type SongList = Vec<PathBuf>;
+/// Shuffles songs from input directory and copies them with prepended random number in the file name to the output directory.
+///
+/// # Example
+///
+/// This example shuffles songs using the arguments supplied to the binary.
+/// ```
+/// use music_organizer::{self, Args};
+///
+/// let app_config = Args::parse_and_get_dirs();
+///
+/// music_organizer::shuffle_songs(app_config).unwrap();
+/// ```
+///
+/// # Errors
+///
+/// This function may return an IO error as [specified in the std crate](https://doc.rust-lang.org/stable/std/io/type.Result.html).
+pub fn shuffle_songs(app_config: AppConfig) -> std::io::Result<()> {
+    let mut songs = get_songs_from_path(app_config.input_dir.clone()).unwrap();
+    println!("Found {} songs.", songs.len());
 
-type GroupedSongs = HashMap<String, SongList>;
+    let mut rng = rand::thread_rng();
+    songs.shuffle(&mut rng);
 
-fn output_grouped_songs(app_config: AppConfig, grouped_songs: GroupedSongs) -> std::io::Result<()> {
-    let AppConfig { input_dir, output_dir, overwrite } = app_config;
+    output_shuffled_songs(app_config, songs)
+}
+
+fn create_output_dir(app_config: &AppConfig) -> std::io::Result<()> {
+    let output_dir = &app_config.output_dir;
 
     if let Err(e) = fs::create_dir(&output_dir) {
         use std::io::ErrorKind::*;
         match e.kind() {
             AlreadyExists => println!("Output directory already exists... Continuing."),
-            _ => return Err(e),
+            _ => return Err(e)
         }
     }
+
+    Ok(())
+}
+
+fn output_shuffled_songs(app_config: AppConfig, shuffled_songs: Vec<PathBuf>) -> std::io::Result<()> {
+    let AppConfig { output_dir, overwrite, .. } = &app_config;
+
+    create_output_dir(&app_config)?;
+
+    for (i, path) in shuffled_songs.into_iter().enumerate() {
+        let mut output_song_path = output_dir.clone();
+        let file_name = path.file_name().expect("filename should've been well-formed");
+        let file_name_str = file_name.to_str().expect("OsStr should've been well-formed");
+        println!("processing: {}", file_name_str);
+
+        let new_file_name = format!("{} - {}", i, file_name_str);
+
+        output_song_path.push(new_file_name);
+
+        if fs::metadata(&output_song_path).is_ok() {
+            if *overwrite {
+                fs::remove_file(&output_song_path)?;
+                fs::copy(&path, &output_song_path)?;
+            } else {
+                println!("File at path `{}` already exists! Use --overwrite to permit overwriting.", output_song_path.to_str().unwrap());
+            }
+        } else {
+            fs::copy(&path, &output_song_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+type SongList = Vec<PathBuf>;
+
+type GroupedSongs = HashMap<String, SongList>;
+
+fn output_grouped_songs(app_config: AppConfig, grouped_songs: GroupedSongs) -> std::io::Result<()> {
+    let AppConfig { input_dir, output_dir, overwrite } = &app_config;
+
+    create_output_dir(&app_config)?;
 
     for (artist, paths) in grouped_songs {
         let mut new_dir_path = output_dir.clone();
@@ -164,7 +260,7 @@ fn output_grouped_songs(app_config: AppConfig, grouped_songs: GroupedSongs) -> s
         }
 
         for path in paths {
-            let file_name = path.file_name().expect("couldn't get a file_name from a path");
+            let file_name = path.file_name().expect("filename should've been well-formed");
             println!("processing: {}", file_name.to_str().unwrap());
 
             let mut input_path = input_dir.clone();
@@ -174,7 +270,7 @@ fn output_grouped_songs(app_config: AppConfig, grouped_songs: GroupedSongs) -> s
             output_path.push(&file_name);
 
             if fs::metadata(&output_path).is_ok() {
-                if overwrite {
+                if *overwrite {
                     fs::remove_file(&output_path)?;
                     fs::copy(&input_path, &output_path)?;
                 } else {

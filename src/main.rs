@@ -1,9 +1,12 @@
-use music_organizer::Args;
+use music_organizer::{Args, organize_songs, shuffle_songs, OperationMode::*};
 
 fn main() -> std::io::Result<()> {
-    let dir_config = Args::parse_and_get_dirs();
+    let (app_config, operation_mode) = Args::parse_and_get_mode_and_dirs();
 
-    music_organizer::organize_songs(dir_config)?;
+    match operation_mode {
+        Organize => organize_songs(app_config)?,
+        Shuffle => shuffle_songs(app_config)?
+    }
 
     Ok(())
 }
